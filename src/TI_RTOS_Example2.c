@@ -69,111 +69,108 @@
 #include "inc/hw_ints.h"
 #include "uartstdio.h"
 
-extern const ti_sysbios_knl_Semaphore_Handle ReflectanceSemaphore;
+extern ti_sysbios_knl_Semaphore_Handle Task0Semaphore;
+volatile uint64_t startCount;
+volatile uint64_t endCount;
 
 void EnablePeripherals();
-void InitializeLocalSerial();
-void RunLongTimer();
-uint16_t GetElapsedTimeMs(uint64_t start, uint64_t end);
-void EnableReflectanceInterrupts();
+void InitializeUART0LocalTerminal();
+void InitializeWTimer1();
 
-static const uint64_t bit64Max = 18446744073709551615;
-volatile uint64_t startTickCount = 0;
-volatile uint64_t endTickCount = 0;
-
-int main(void)
+void WTimer1IntHandler()
 {
-    // Set clock rate to 200/5 = 40 mHz
-    SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
-
-    // Enable system interrupts
-    IntMasterEnable();
-
-    EnablePeripherals();
-    InitializeLocalSerial();
-    EnableReflectanceInterrupts();
-    RunLongTimer();
-
-    UARTprintf("Main program is running.\n");
-
-    /* Start BIOS */
-    BIOS_start();
-
-    return (0);
+    TimerIntClear(WTIMER1_BASE, TIMER_TIMA_TIMEOUT);
+    Semaphore_post(Task0Semaphore);
 }
 
 void GPIOAIntHandler()
 {
     GPIOIntClear(GPIO_PORTA_BASE, GPIO_INT_PIN_4);
-    endTickCount = TimerValueGet64(WTIMER0_BASE);
-    uint32_t elapsedTicks = endTickCount - startTickCount;
-    UARTprintf("Elapsed Ticks: %i\n", elapsedTicks);
+    endCount = TimerValueGet64(WTIMER0_BASE);
+
+    uint64_t elapsedCount = endCount - startCount;
+    if (elapsedCount > 40000)
+    {
+        UARTprintf("On a dark surface\n");
+    }
+    else
+    {
+        UARTprintf("On a white surface\n");
+    }
 }
 
-void WTimer1AIntHandler()
-{
-    TimerIntClear(WTIMER1_BASE, TIMER_TIMA_TIMEOUT);
-    UARTprintf("Timer Interrupt Triggered\n");
-    Semaphore_post(ReflectanceSemaphore);
-}
-
-void TriggerReflectanceSensor()
+void Task0Func()
 {
     while(1)
     {
-        Semaphore_pend(ReflectanceSemaphore, BIOS_WAIT_FOREVER);
+        Semaphore_pend(Task0Semaphore, BIOS_WAIT_FOREVER);
         GPIOPinTypeGPIOOutput(GPIO_PORTA_BASE, GPIO_PIN_4);
         GPIOPinWrite(GPIO_PORTA_BASE, GPIO_PIN_4, GPIO_PIN_4);
-        startTickCount = TimerValueGet64(WTIMER0_BASE);
-        SysCtlDelay(SysCtlClockGet()/3 * 10.0/100000);
+        SysCtlDelay(SysCtlClockGet()/3 * 10 * 1.0/1000000);
         GPIOPinTypeGPIOInput(GPIO_PORTA_BASE, GPIO_PIN_4);
+        startCount = TimerValueGet64(WTIMER0_BASE);
     }
 }
+
 void EnablePeripherals()
 {
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER0);
     SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER1);
 }
 
-void InitializeLocalSerial()
+void InitializeUART0LocalTerminal()
 {
     GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
     GPIOPinConfigure(GPIO_PA0_U0RX);
     GPIOPinConfigure(GPIO_PA1_U0TX);
     UARTEnable(UART0_BASE);
 
-    // Link UARTprintf function for UART0
     UARTStdioConfig(0, 115200, SysCtlClockGet());
 }
 
-void RunLongTimer()
+void InitializeWTimer0()
 {
-    TimerClockSourceSet(WTIMER0_BASE, TIMER_CLOCK_SYSTEM);
     TimerConfigure(WTIMER0_BASE, TIMER_CFG_ONE_SHOT_UP);
-    TimerLoadSet64(WTIMER0_BASE, bit64Max);
+    TimerLoadSet64(WTIMER0_BASE, 18446744073709551615);
     TimerEnable(WTIMER0_BASE, TIMER_A);
 }
 
-uint16_t GetElapsedTimeMs(uint64_t start, uint64_t end)
+void InitializeWTimer1()
 {
-    uint64_t elapsedTicks = start - end;
-    return elapsedTicks * 1.0/SysCtlClockGet() * 1000;
-}
-
-void EnableReflectanceInterrupts()
-{
-    // Configure Wide Timers for repeated triggers
     TimerConfigure(WTIMER1_BASE, TIMER_CFG_A_PERIODIC | TIMER_CFG_SPLIT_PAIR);
     TimerIntEnable(WTIMER1_BASE, TIMER_TIMA_TIMEOUT);
     IntEnable(INT_WTIMER1A);
-    TimerLoadSet(WTIMER1_BASE, TIMER_A, SysCtlClockGet() * 0.4);
+    TimerLoadSet(WTIMER1_BASE, TIMER_A, SysCtlClockGet() * 0.5);
     TimerEnable(WTIMER1_BASE, TIMER_A);
+}
 
-    // Enable interrupt when voltage falls
+void InitializeGPIOAInterrupt()
+{
     GPIOIntEnable(GPIO_PORTA_BASE, GPIO_INT_PIN_4);
     GPIOIntTypeSet(GPIO_PORTA_BASE, GPIO_PIN_4, GPIO_FALLING_EDGE);
+}
+
+/*
+ *  ======== main ========
+ */
+int main(void)
+{
+    // Running at 40 Mhz for main clock
+    SysCtlClockSet(SYSCTL_SYSDIV_5 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
+
+    IntMasterEnable();
+
+    EnablePeripherals();
+    InitializeUART0LocalTerminal();
+    InitializeWTimer0();
+    InitializeWTimer1();
+    InitializeGPIOAInterrupt();
+    UARTprintf("Main Program is running!\n");
+
+    /* Start BIOS */
+    BIOS_start();
+
+    return (0);
 }
